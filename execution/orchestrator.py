@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import anthropic
 from lib.state import load_state, save_state, mark_escalated
-from skills import editors, clients, crosscheck, checkout
+from skills import editors, clients, crosscheck, checkout, infer_signals, infer_client_signals
 from skills import notify_simon, update_status, draft_message
 
 logger = logging.getLogger(__name__)
@@ -19,8 +19,20 @@ _anthropic_client = anthropic.Anthropic()
 SYSTEM_PROMPT = (
     "You are the orchestration brain for a PM agent managing a video editing team.\n"
     "Your job: analyze skill output, decide what Simon needs to know, and decide what actions to take.\n\n"
-    "Tier 1 actions (act freely): DM Simon, update Airtable Editing Status (only if editor explicitly confirmed done).\n"
+    "Tier 1 actions (act freely): DM Simon, update Airtable Editing Status.\n"
     "Tier 2 actions (queue for Simon approval): send message to editor channel, send message to client channel.\n\n"
+    "When infer_signals results are present, route by confidence:\n"
+    "- 'high': add an update_status tier1 action — editor clearly indicated completion.\n"
+    "- 'medium': add a notify_simon tier1 action with message: "
+    "\"Heads up: [editor] may have indicated [video_ref] is ready for [implied_status] "
+    "(their message: '[trigger_message]'). Confirm and update Airtable if correct.\"\n"
+    "- 'low': no action.\n\n"
+    "When infer_client_signals results are present:\n"
+    "- ANY confidence ('high' or 'medium'): add a notify_simon tier1 action — "
+    "NEVER auto-update for client approvals. Message format: "
+    "\"Client [client] may have approved [video_ref] (message: '[trigger_message]'). "
+    "Confirm and update to '80 - Approved By Client' if correct.\"\n\n"
+    "For status updates NOT from infer_signals: only update if editor explicitly confirmed.\n"
     "Avoid duplicate escalations — check state.last_escalated before escalating a name again.\n\n"
     "Return ONLY valid JSON. No markdown fences. No extra text."
 )
@@ -48,27 +60,68 @@ def _run_relevant_skills(trigger: str, context: str, state: dict) -> dict:
     if trigger == "morning_briefing":
         results["editors"] = _run_skill("editors", editors.run, hours=48)
         results["clients"] = _run_skill("clients", clients.run, hours=48)
+        editors_data = results["editors"].get("data", {}).get("editors", [])
+        if editors_data:
+            results["infer_signals"] = _run_skill(
+                "infer_signals", infer_signals.run, editors_data=editors_data
+            )
+        clients_data = results["clients"].get("data", {}).get("clients", [])
+        if clients_data:
+            results["infer_client_signals"] = _run_skill(
+                "infer_client_signals", infer_client_signals.run, clients_data=clients_data
+            )
 
     elif trigger == "midday_crosscheck":
         results["crosscheck"] = _run_skill("crosscheck", crosscheck.run, hours=24)
+        results["editors"] = _run_skill("editors", editors.run, hours=24)
+        editors_data = results["editors"].get("data", {}).get("editors", [])
+        if editors_data:
+            results["infer_signals"] = _run_skill(
+                "infer_signals", infer_signals.run, editors_data=editors_data
+            )
 
     elif trigger == "eod_checkout":
         results["checkout"] = _run_skill("checkout", checkout.run, days=1)
 
     elif trigger == "urgent_watch":
         results["clients"] = _run_skill("clients", clients.run, hours=6)
+        clients_data = results["clients"].get("data", {}).get("clients", [])
+        if clients_data:
+            results["infer_client_signals"] = _run_skill(
+                "infer_client_signals", infer_client_signals.run, clients_data=clients_data
+            )
 
     elif trigger == "weekly_summary":
         results["editors"] = _run_skill("editors", editors.run, hours=168)
         results["clients"] = _run_skill("clients", clients.run, hours=168)
         results["crosscheck"] = _run_skill("crosscheck", crosscheck.run, hours=168)
         results["checkout"] = _run_skill("checkout", checkout.run, days=7)
+        editors_data = results["editors"].get("data", {}).get("editors", [])
+        if editors_data:
+            results["infer_signals"] = _run_skill(
+                "infer_signals", infer_signals.run, editors_data=editors_data
+            )
+        clients_data = results["clients"].get("data", {}).get("clients", [])
+        if clients_data:
+            results["infer_client_signals"] = _run_skill(
+                "infer_client_signals", infer_client_signals.run, clients_data=clients_data
+            )
 
     elif trigger == "simon_query":
         results["editors"] = _run_skill("editors", editors.run)
         results["clients"] = _run_skill("clients", clients.run)
         results["crosscheck"] = _run_skill("crosscheck", crosscheck.run)
         results["checkout"] = _run_skill("checkout", checkout.run)
+        editors_data = results["editors"].get("data", {}).get("editors", [])
+        if editors_data:
+            results["infer_signals"] = _run_skill(
+                "infer_signals", infer_signals.run, editors_data=editors_data
+            )
+        clients_data = results["clients"].get("data", {}).get("clients", [])
+        if clients_data:
+            results["infer_client_signals"] = _run_skill(
+                "infer_client_signals", infer_client_signals.run, clients_data=clients_data
+            )
 
     return results
 
